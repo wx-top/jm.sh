@@ -1,11 +1,14 @@
 #!/bin/bash
 
-# 项目配置映射 (项目名:jar文件名)
+# 项目配置映射 (项目名:jar文件路径)
+# 支持绝对路径和相对路径
+# 绝对路径示例: ["/opt/apps/myapp/myapp.jar"]
+# 相对路径示例: ["./jars/myapp.jar"] 或 ["myapp.jar"]
 declare -A PROJECT_JARS=(
-    ["app"]="app.jar"
+    ["smartlamp"]="/opt/smartlamp/smartlamp.jar"
     # 可以在这里添加更多项目
-    # ["project2"]="project2.jar"
-    # ["project3"]="project3.jar"
+    # ["project2"]="/opt/apps/project2/project2.jar"
+    # ["project3"]="./jars/project3.jar"
 )
 
 # 全局变量
@@ -15,7 +18,38 @@ PID_FILE=""
 LOG_FILE=""
 CONFIG_FILE_DEFAULT=""
 
-# 初始化项目配置
+# 获取脚本所在目录
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 初始化项目路径（不检查JAR文件存在性）
+init_project_paths() {
+    local project="$1"
+    
+    PROJECT_NAME="$project"
+    if [[ -n "${PROJECT_JARS[$project]}" ]]; then
+        JAR_NAME="${PROJECT_JARS[$project]}"
+    else
+        JAR_NAME="${project}.jar"
+    fi
+    
+    # 确定文件存放目录
+    local file_dir
+    if [[ "$JAR_NAME" == /* ]]; then
+        # 绝对路径：PID和日志文件放在JAR文件所在目录
+        file_dir="$(dirname "$JAR_NAME")"
+    else
+        # 相对路径：JAR文件相对于脚本目录，PID和日志文件也放在脚本目录
+        JAR_NAME="$SCRIPT_DIR/$JAR_NAME"
+        file_dir="$SCRIPT_DIR"
+    fi
+    
+    # 设置PID和日志文件路径
+    PID_FILE="$file_dir/${PROJECT_NAME}.pid"
+    LOG_FILE="$file_dir/${PROJECT_NAME}.log"
+    CONFIG_FILE_DEFAULT="${PROJECT_NAME}.properties"
+}
+
+# 初始化项目配置（包含JAR文件存在性检查）
 init_project() {
     local project="$1"
     
@@ -25,21 +59,14 @@ init_project() {
         exit 1
     fi
     
-    PROJECT_NAME="$project"
-    if [[ -n "${PROJECT_JARS[$project]}" ]]; then
-        JAR_NAME="${PROJECT_JARS[$project]}"
-    else
-        JAR_NAME="${project}.jar"
-    fi
-    
-    PID_FILE="${PROJECT_NAME}.pid"
-    LOG_FILE="${PROJECT_NAME}.log"
-    CONFIG_FILE_DEFAULT="${PROJECT_NAME}.properties"
+    # 调用路径初始化
+    init_project_paths "$project"
     
     # 检查jar文件是否存在
     if [[ ! -f "$JAR_NAME" ]]; then
         echo "错误: JAR文件不存在: $JAR_NAME"
         echo "请确保项目 '$PROJECT_NAME' 的JAR文件存在"
+        echo "当前配置的JAR路径: $JAR_NAME"
         exit 1
     fi
 }
@@ -145,14 +172,13 @@ stop() {
     shift
   done
   
-  # 初始化项目配置（不检查jar文件存在性）
+  # 初始化项目路径
   if [[ -z "$project" ]]; then
     echo "错误: 必须使用 -p 参数指定项目名称"
     echo "使用 '$0 help' 查看帮助信息"
     exit 1
   fi
-  PROJECT_NAME="$project"
-  PID_FILE="${PROJECT_NAME}.pid"
+  init_project_paths "$project"
   
   if [ -f "$PID_FILE" ]; then
     PID=$(awk '{print $1}' "$PID_FILE")
@@ -198,15 +224,13 @@ status() {
     shift
   done
   
-  # 初始化项目配置（不检查jar文件存在性）
+  # 初始化项目路径
   if [[ -z "$project" ]]; then
     echo "错误: 必须使用 -p 参数指定项目名称"
     echo "使用 '$0 help' 查看帮助信息"
     exit 1
   fi
-  PROJECT_NAME="$project"
-  PID_FILE="${PROJECT_NAME}.pid"
-  LOG_FILE="${PROJECT_NAME}.log"
+  init_project_paths "$project"
   
   if [ -f "$PID_FILE" ]; then
     PID=$(awk '{print $1}' "$PID_FILE")
@@ -263,14 +287,13 @@ log() {
     shift
   done
   
-  # 初始化项目配置（不检查jar文件存在性）
+  # 初始化项目路径
   if [[ -z "$project" ]]; then
     echo "错误: 必须使用 -p 参数指定项目名称"
     echo "使用 '$0 help' 查看帮助信息"
     exit 1
   fi
-  PROJECT_NAME="$project"
-  LOG_FILE="${PROJECT_NAME}.log"
+  init_project_paths "$project"
   
   if [ -f "$LOG_FILE" ]; then
     tail -f "$LOG_FILE"
@@ -285,7 +308,9 @@ list() {
   
   # 检查配置中的项目
   for project in "${!PROJECT_JARS[@]}"; do
-    local pid_file="${project}.pid"
+    # 使用正确的路径逻辑
+    init_project_paths "$project"
+    local pid_file="$PID_FILE"
     if [ -f "$pid_file" ]; then
       local pid=$(awk '{print $1}' "$pid_file")
       if kill -0 $pid 2>/dev/null; then
@@ -299,7 +324,7 @@ list() {
   done
   
   # 检查其他可能的项目（通过.pid文件）
-  for pid_file in *.pid; do
+  for pid_file in "$SCRIPT_DIR"/*.pid; do
     if [ -f "$pid_file" ]; then
       local project_name=$(basename "$pid_file" .pid)
       local is_known=false
@@ -355,6 +380,17 @@ help() {
     echo "  未配置任何项目"
   fi
   echo "  可以在脚本顶部的 PROJECT_JARS 数组中添加更多项目配置"
+  echo "  支持绝对路径和相对路径（相对于脚本目录）"
+  echo "  文件存放规则："
+  echo "    - 绝对路径JAR：PID和日志文件存放在JAR文件所在目录"
+  echo "    - 相对路径JAR：PID和日志文件存放在脚本目录: $SCRIPT_DIR"
+  echo ""
+  echo "路径配置示例："
+  echo "  # 绝对路径"
+  echo "  [\"webapp\"]="/opt/apps/webapp/webapp.jar""
+  echo "  # 相对路径（相对于脚本目录）"
+  echo "  [\"api\"]="./jars/api.jar""
+  echo "  [\"service\"]="service.jar""
   echo ""
   echo "用法示例："
   echo "  $0 start -p smartlamp           # 启动指定项目（前台运行）"
@@ -368,6 +404,12 @@ help() {
   echo "  $0 log -p myapp                 # 查看指定项目日志"
   echo "  $0 list                         # 显示所有项目状态"
   echo "  $0 help                         # 显示帮助信息"
+  echo ""
+  echo "注意事项："
+  echo "  - 脚本可以在任意目录执行，JAR文件路径会自动解析"
+  echo "  - 绝对路径JAR：PID和日志文件存放在JAR文件所在目录"
+  echo "  - 相对路径JAR：PID和日志文件存放在脚本目录"
+  echo "  - 相对路径是相对于脚本目录，不是当前工作目录"
 }
 
 case "$1" in
